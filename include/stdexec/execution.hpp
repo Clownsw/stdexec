@@ -250,6 +250,9 @@ namespace stdexec {
   // [execution.receivers]
   namespace __receivers {
     struct set_value_t {
+      template <class _Fn, class... _Args>
+        using __f = __minvoke<_Fn, _Args...>;
+
       template <class _Receiver, class... _As>
         requires tag_invocable<set_value_t, _Receiver, _As...>
       void operator()(_Receiver&& __rcvr, _As&&... __as) const noexcept {
@@ -259,6 +262,10 @@ namespace stdexec {
     };
 
     struct set_error_t {
+      template <class _Fn, class... _Args>
+          requires (sizeof...(_Args) == 1)
+        using __f = __minvoke<_Fn, _Args...>;
+
       template <class _Receiver, class _Error>
         requires tag_invocable<set_error_t, _Receiver, _Error>
       void operator()(_Receiver&& __rcvr, _Error&& __err) const noexcept {
@@ -268,6 +275,10 @@ namespace stdexec {
     };
 
     struct set_stopped_t {
+      template <class _Fn, class... _Args>
+          requires (sizeof...(_Args) == 0)
+        using __f = __minvoke<_Fn, _Args...>;
+
       template <class _Receiver>
         requires tag_invocable<set_stopped_t, _Receiver>
       void operator()(_Receiver&& __rcvr) const noexcept {
@@ -282,6 +293,10 @@ namespace stdexec {
   inline constexpr set_value_t set_value{};
   inline constexpr set_error_t set_error{};
   inline constexpr set_stopped_t set_stopped{};
+
+  template <class _Tag>
+    concept __completion_tag =
+      __one_of<_Tag, set_value_t, set_error_t, set_stopped_t>;
 
   inline constexpr struct __try_call_t {
     template <class _Receiver, class _Fun, class... _Args>
@@ -340,38 +355,61 @@ namespace stdexec {
       __dependent await_resume();
 #endif
     };
+
+#if STDEXEC_NVHPC()
+    template <class _Sig>
+      concept __completion_signature =
+        __compl_sigs::__is_compl_sig<_Sig>;
+
+    template <class _Sig, class _Tag, class _Ty = __q<__types>>
+      using __signal_args_t =
+        decltype(__compl_sigs::__test((_Sig*) nullptr, _Tag{}, _Ty{}));
+#else
+    template <class _Sig>
+      concept __completion_signature =
+        __typename<decltype(__compl_sigs::__test((_Sig*) nullptr))>;
+
+    template <class _Sig, class _Tag, class _Ty = __q<__types>>
+      using __signal_args_t =
+        decltype(__compl_sigs::__test<_Tag, _Ty>((_Sig*) nullptr));
+#endif
   } // namespace __compl_sigs
+  using __compl_sigs::__completion_signature;
 
   template <same_as<no_env>>
     using dependent_completion_signatures =
       __compl_sigs::__dependent;
 
-#if STDEXEC_NVHPC()
-  template <class _Sig>
-    concept __completion_signature =
-      __compl_sigs::__is_compl_sig<_Sig>;
-
-  template <class _Sig, class _Tag, class _Ty = __q<__types>>
-    using __signal_args_t =
-      decltype(__compl_sigs::__test((_Sig*) nullptr, _Tag{}, _Ty{}));
-#else
-  template <class _Sig>
-    concept __completion_signature =
-      __typename<decltype(__compl_sigs::__test((_Sig*) nullptr))>;
-
-  template <class _Sig, class _Tag, class _Ty = __q<__types>>
-    using __signal_args_t =
-      decltype(__compl_sigs::__test<_Tag, _Ty>((_Sig*) nullptr));
-#endif
-
-  template <__completion_signature... _Sigs>
+  template <__compl_sigs::__completion_signature... _Sigs>
     struct completion_signatures {
       template <class _Tag, class _Tuple, class _Variant>
         using __gather_sigs =
           __minvoke<
             __concat<_Variant>,
-            __signal_args_t<_Sigs, _Tag, _Tuple>...>;
+            __compl_sigs::__signal_args_t<_Sigs, _Tag, _Tuple>...>;
     };
+
+  namespace __compl_sigs {
+    template <class _TaggedTuple, __completion_tag _Tag, class... _Ts>
+      auto __as_tagged_tuple_(_Tag(*)(_Ts...), _TaggedTuple*)
+        -> __mconst<__minvoke<_TaggedTuple, _Tag, _Ts...>>;
+
+    template <class _Sig, class _TaggedTuple>
+      using __as_tagged_tuple =
+        decltype((__as_tagged_tuple_)((_Sig*) nullptr, (_TaggedTuple*) nullptr));
+
+    template <class _TaggedTuple, class _Variant, class... _Sigs>
+      auto __for_all_sigs_(completion_signatures<_Sigs...>*, _TaggedTuple*, _Variant*)
+        -> __mconst<
+            __minvoke<
+              _Variant,
+              __minvoke<__as_tagged_tuple<_Sigs, _TaggedTuple>>...>>;
+
+    template <class _Completions, class _TaggedTuple, class _Variant>
+      using __for_all_sigs =
+        __minvoke<
+          decltype((__for_all_sigs_)((_Completions*) nullptr, (_TaggedTuple*) nullptr, (_Variant*) nullptr))>;
+  } // namespace __compl_sigs
 
   template <class _Ty>
     concept __is_completion_signatures =
@@ -394,7 +432,7 @@ namespace stdexec {
     using __concat_completion_signatures_t =
       __t<__concat_completion_signatures<_Completions...>>;
 
-  template <class _Traits, class _Env>
+  template <class _Completions, class _Env>
     inline constexpr bool
       __valid_completion_signatures_ = false;
   template <class... _Sigs, class _Env>
@@ -404,9 +442,9 @@ namespace stdexec {
     inline constexpr bool
       __valid_completion_signatures_<dependent_completion_signatures<no_env>, no_env> = true;
 
-  template <class _Traits, class _Env>
+  template <class _Completions, class _Env>
     concept __valid_completion_signatures =
-      __valid_completion_signatures_<_Traits, _Env>;
+      __valid_completion_signatures_<_Completions, _Env>;
 
   /////////////////////////////////////////////////////////////////////////////
   // [execution.receivers]
@@ -578,11 +616,25 @@ namespace stdexec {
   template <class... _Ts>
     using __decayed_tuple = std::tuple<decay_t<_Ts>...>;
 
+  template <class _Tag, class _Tuple>
+    struct __select_completions_for {
+      template <same_as<_Tag> _Tag2, class... _Args>
+        using __f = __minvoke<_Tag2, _Tuple, _Args...>;
+    };
+
+  template <class _Tag, class _Tuple>
+    using __select_completions_for_or =
+      __with_default<
+        __select_completions_for<_Tag, _Tuple>,
+        __>;
+
   template <class _Tag, class _Sender, class _Env, class _Tuple, class _Variant>
       requires sender<_Sender, _Env>
     using __gather_sigs_t =
-      typename completion_signatures_of_t<_Sender, _Env>
-        ::template __gather_sigs<_Tag, _Tuple, _Variant>;
+      __compl_sigs::__for_all_sigs<
+        completion_signatures_of_t<_Sender, _Env>,
+        __select_completions_for_or<_Tag, _Tuple>,
+        __remove<__, _Variant>>;
 
   template <class _Sender,
             class _Env = no_env,
