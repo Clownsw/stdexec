@@ -396,7 +396,7 @@ namespace stdexec {
 
     template <class _Sig, class _TaggedTuple>
       using __as_tagged_tuple =
-        decltype((__as_tagged_tuple_)((_Sig*) nullptr, (_TaggedTuple*) nullptr));
+        decltype(__compl_sigs::__as_tagged_tuple_((_Sig*) nullptr, (_TaggedTuple*) nullptr));
 
     template <class _TaggedTuple, class _Variant, class... _Sigs>
       auto __for_all_sigs_(completion_signatures<_Sigs...>*, _TaggedTuple*, _Variant*)
@@ -408,7 +408,8 @@ namespace stdexec {
     template <class _Completions, class _TaggedTuple, class _Variant>
       using __for_all_sigs =
         __minvoke<
-          decltype((__for_all_sigs_)((_Completions*) nullptr, (_TaggedTuple*) nullptr, (_Variant*) nullptr))>;
+          decltype(__compl_sigs::__for_all_sigs_(
+            (_Completions*) nullptr, (_TaggedTuple*) nullptr, (_Variant*) nullptr))>;
   } // namespace __compl_sigs
 
   template <class _Ty>
